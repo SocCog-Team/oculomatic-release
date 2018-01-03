@@ -12,10 +12,18 @@
 
 #include "ofApp.h"
 #include "FlyCapture2.h"
-#include "NIDAQmx.h"
-#include "boost/circular_buffer.hpp"
+#include <NIDAQmx.h>
+#include <boost/circular_buffer.hpp>
 
 using namespace FlyCapture2;
+
+std::wstring NumToStrWithLeadingZeros(int number, int length) {
+	std::wstring str = std::to_wstring(number);
+	int strLen = str.length();
+	if (strLen < length)
+		str = std::wstring(length - strLen, '0').append(str);
+	return str;
+}
 
 //--------------------------------------------------------------
 void ofApp::setup(){
@@ -95,8 +103,14 @@ void ofApp::setup(){
     gui.add(screenSize.setup("screen size", ofToString(ofGetWidth())+"x"+ofToString(ofGetHeight())));
     bHide = false;
 	pHide = true;
-    
 
+	isROIselected_ = false;
+ }
+
+ofApp::~ofApp()
+{
+	if (outfile.is_open())
+		outfile.close();
 }
 
 //----------------------------------------------fly----------------
@@ -117,54 +131,90 @@ void ofApp::update(){
 	Image monoImage; 
 	rawImage.Convert(FlyCapture2::PIXEL_FORMAT_MONO8, &monoImage);
     
-    if (bNewFrame){
-        
+	if (bNewFrame) {
+
 		monoImg.setFromPixels(monoImage.GetData(), monoImage.GetCols(), monoImage.GetRows());
-        
-        threshImg_pupil = monoImg;
-        threshImg_cr = monoImg;
-        threshImg_pupil.threshold(pupil_threshold,true);
-        threshImg_cr.threshold(cr_threshold,false);
+
+		threshImg_pupil = monoImg;
+		threshImg_cr = monoImg;
+
+		threshImg_pupil.threshold(pupil_threshold, true);
+		threshImg_cr.threshold(cr_threshold, false);
+
+		if (isROIselected_) { //set ROI
+			threshImg_pupil.setROI(workingROI_);
+			threshImg_cr.setROI(workingROI_);
+		}			
         blobfinder_pupil.findContours(threshImg_pupil, minarea_p, maxarea_p, 1, false);
         blobfinder_cr.findContours(threshImg_cr, minarea_cr, maxarea_cr, 1,false);
-		if (blobfinder_pupil.nBlobs > 0) {
-			normalize_pixelvalues(blobfinder_pupil.blobs.at(0).centroid.x, blobfinder_pupil.blobs.at(0).centroid.y, aout);
+		if (isROIselected_) { //reset ROI (otherwise we have problems with copy operations)
+			threshImg_pupil.resetROI();
+			threshImg_cr.resetROI();
+		}
+
+		if (blobfinder_pupil.nBlobs>0) {
+			normalize_pixelvalues(blobfinder_pupil.blobs.at(0).centroid.x + workingROI_.x, blobfinder_pupil.blobs.at(0).centroid.y + workingROI_.y, aout);
 			if (heuristic) {
 				heuristic_filtering(aout);
 			}
 			DAQmxWriteAnalogF64(taskHandle, 1, 1, 10.0, DAQmx_Val_GroupByChannel, aout, NULL, NULL);
+			if (isRecording) {
+				LARGE_INTEGER li, frequency;
+				QueryPerformanceCounter(&li);
+				QueryPerformanceFrequency(&frequency);
+				double buffer[4];
+				buffer[0] = static_cast<double>(aout[0]);	//! x coordinate of pupil
+				buffer[1] = static_cast<double>(aout[1]);
+				buffer[2] = static_cast<double>(blobfinder_pupil.blobs.at(0).area);
+				buffer[3] = static_cast<double>(li.QuadPart) / static_cast<double>(frequency.QuadPart); //timestamp
+				outfile.write(reinterpret_cast<const char*>(buffer), 4*sizeof(double));
+			}
 			//plotterX->setValue(aout[0]);
 			//plotterY->setValue(aout[1]);
 		}
-    }
+	}
 
     
 }
 
 //--------------------------------------------------------------
-void ofApp::draw(){
-    ofSetColor(255,255,255);
-    ofDrawBitmapString(ofToString(ofGetFrameRate())+"fps", 10, monoImg.getHeight() + 20);
-    ofDrawBitmapString("L: load settings", 10, monoImg.getHeight() + 35);
-    ofDrawBitmapString("S: save settings", 10, monoImg.getHeight() + 50);
-	ofDrawBitmapString("X: center voltage", 10, monoImg.getHeight() + 65);
-	ofDrawBitmapString("P: voltage display (experimental!)", 10, monoImg.getHeight() + 80);
+void ofApp::draw() {
+	ofSetColor(255, 255, 255);
+	ofDrawBitmapString(ofToString(ofGetFrameRate()) + "fps", 10, monoImg.getHeight() + 20);
+	/*AU 26072017  R and T added to control writing to file, begin */
+	ofDrawBitmapString("R: Record pupil position and area to file", 10, monoImg.getHeight() + 35);
+	ofDrawBitmapString("T: Terminate recording", 10, monoImg.getHeight() + 50);
+	ofDrawBitmapString("L: Load settings", 10, monoImg.getHeight() + 65);
+	ofDrawBitmapString("S: Save settings", 10, monoImg.getHeight() + 80);
+	ofDrawBitmapString("X: center voltage", 10, monoImg.getHeight() + 95);
+	ofDrawBitmapString("P: voltage display (experimental!)", 10, monoImg.getHeight() + 110);
+
 	monoImg.draw(0, 0);
-    threshImg_pupil.draw(monoImg.getWidth(),0,monoImg.getWidth() / 2, monoImg.getHeight() / 2);
-    threshImg_cr.draw(monoImg.getWidth(),monoImg.getHeight() /  2, monoImg.getWidth() / 2, monoImg.getHeight() / 2);
-    blobfinder_pupil.draw(0,0);
+    threshImg_pupil.draw(monoImg.getWidth(), 0, monoImg.getWidth()/2, monoImg.getHeight()/2);
+    threshImg_cr.draw(monoImg.getWidth(), monoImg.getHeight()/2, monoImg.getWidth()/2, monoImg.getHeight()/2);
+    blobfinder_pupil.draw(workingROI_.x, workingROI_.y); // draws pupil blob with a shift on ROI positions
     //blobfinder_cr.draw(0,0);
     if(blobfinder_pupil.nBlobs>0){
         ofNoFill();
         ofSetColor(0,0,255);
-        ofDrawCircle(blobfinder_pupil.blobs.at(0).centroid,3);
-        ofSetColor(0,255,255);
+        ofDrawCircle(blobfinder_pupil.blobs.at(0).centroid.x + workingROI_.x, blobfinder_pupil.blobs.at(0).centroid.y + workingROI_.y,3);
+        //ofSetColor(0,255,255);
         //ofDrawCircle(blobfinder_pupil.blobs.at(0).centroid.x, blobfinder_pupil.blobs.at(0).centroid.y, blobfinder_pupil.blobs.at(0).boundingRect.width/2);
     }
-    if(blobfinder_cr.nBlobs>0){
+    if(blobfinder_cr.nBlobs > 0){
         ofSetColor(255,0,255);
-        ofDrawCircle(blobfinder_cr.blobs.at(0).centroid.x,blobfinder_cr.blobs.at(0).centroid.y,blobfinder_cr.blobs.at(0).boundingRect.width/2);
+        //ofDrawCircle(blobfinder_cr.blobs.at(0).centroid.x, blobfinder_cr.blobs.at(0).centroid.y, blobfinder_cr.blobs.at(0).boundingRect.width/2);
+		ofDrawCircle(blobfinder_cr.blobs.at(0).centroid.x + workingROI_.x, blobfinder_cr.blobs.at(0).centroid.y + workingROI_.y, 3);
     }
+
+	if ((isROIselected_) || (isROIselectionStarted_)) {
+		ofSetColor(255, 0, 0);
+		ofNoFill();
+		if (isROIselectionStarted_)
+			ofDrawRectangle(newROI_);
+		else
+			ofDrawRectangle(workingROI_);
+	}
     
     if(!bHide){
         gui.draw();
@@ -208,6 +258,22 @@ void ofApp::keyReleased(int key){
 	else if (key == 'p') {
 		pHide = !pHide;
 	}
+	else if (key == 'r') { //! initiate writing values in file
+		if (outfile.is_open())
+			outfile.close();
+		time_t t = time(0);   // get time now
+		struct tm * now = localtime(&t);
+		std::wstring outputFilename = L"eyetracking" + NumToStrWithLeadingZeros(now->tm_hour, 2) + NumToStrWithLeadingZeros(now->tm_min, 2)
+			+ NumToStrWithLeadingZeros(now->tm_sec, 2) + NumToStrWithLeadingZeros(now->tm_mday, 2)
+			+ NumToStrWithLeadingZeros(now->tm_mon + 1, 2) + std::to_wstring(now->tm_year + 1900) + L".bin";
+		outfile.open(outputFilename, ios::out | ios::binary);
+		isRecording = true;
+	}
+	else if (key == 't') {
+		if (outfile.is_open())
+			outfile.close();
+		isRecording = false;
+	}
 }
 
 //--------------------------------------------------------------
@@ -217,17 +283,50 @@ void ofApp::mouseMoved(int x, int y ){
 
 //--------------------------------------------------------------
 void ofApp::mouseDragged(int x, int y, int button){
-
+	if ((button == 0) && (isROIselectionStarted_)) {
+		//! set ROI size
+		newROI_.setWidth(x - newROI_.getX());
+		newROI_.setHeight(y - newROI_.getY());
+	}
 }
 
 //--------------------------------------------------------------
 void ofApp::mousePressed(int x, int y, int button){
-
+	if (button == 0) {//! left button pressed
+		isROIselectionStarted_ = true;
+		workingROI_ = ofRectangle(0, 0, monoImg.getWidth(), monoImg.getHeight()); // set to default
+		newROI_.setX(x);
+		newROI_.setY(y);
+		newROI_.setWidth(1);
+		newROI_.setHeight(1);
+	}
+	else if (button == 2) {//! right button pressed
+		isROIselectionStarted_ = false;
+		isROIselected_ = false;
+	}
 }
 
 //--------------------------------------------------------------
-void ofApp::mouseReleased(int x, int y, int button){
+void ofApp::mouseReleased(int x, int y, int button) {
+	//! If ROI selection was started and  left button released:
+	if ((isROIselectionStarted_) && (button == 0)) {
+		isROIselectionStarted_ = false;
 
+		//! set ROI size
+		newROI_.setWidth(x - newROI_.getX());
+		newROI_.setHeight(y - newROI_.getY());
+		newROI_.standardize(); //! check and correct negative sizes
+
+		//! if ROI is large enough - we select it
+		if ((newROI_.getWidth() > 10) && (newROI_.getHeight() > 10) && (newROI_.getWidth()*newROI_.getHeight() > minarea_p)) {
+			workingROI_ = newROI_;
+			isROIselected_ = true;
+		}
+		else { //! otherwise reset to initial ROI
+			workingROI_ = ofRectangle(0, 0, monoImg.getWidth(), monoImg.getHeight());
+			isROIselected_ = false;
+		}
+	}
 }
 
 //--------------------------------------------------------------

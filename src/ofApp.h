@@ -16,14 +16,15 @@
 #include "ofxGui.h"
 //#include "ofxDatGui.h"
 #include "ofxOpenCv.h"
-#include "FlyCapture2.h"
-#include "NIDAQmx.h"
-#include "boost/circular_buffer.hpp"
+#include <FlyCapture2.h>
+#include <NIDAQmx.h>
+//#define float64 double
+#include <boost/circular_buffer.hpp>
+#include <fstream> // for writing values in file
 
 using namespace FlyCapture2;
 
 class ofApp : public ofBaseApp{
-
 	public:
 		void setup();
 		void update();
@@ -91,6 +92,16 @@ class ofApp : public ofBaseApp{
 		float					tmp1, tmp2;
 		boost::circular_buffer<float> buffer_x;
 		boost::circular_buffer<float> buffer_y;
+
+		~ofApp();
+	private:
+		ofstream outfile;
+		bool isRecording;
+
+		ofRectangle newROI_;
+		ofRectangle workingROI_;
+		bool isROIselectionStarted_;
+		bool isROIselected_;
 };
 /*
 class Template : public ofxDatGuiTemplate
